@@ -1,0 +1,192 @@
+import Foundation
+
+struct Game: Identifiable, Codable {
+    let id: String
+    let homeTeam: TeamInfo
+    let visitorTeam: TeamInfo
+    let gameTime: Date
+    let arenaName: String
+    let status: Int // Game status: 1 (future), 2 (live), 3 (past)
+    
+    enum CodingKeys: String, CodingKey {
+        case id = "uid"
+        case homeTeam = "h"
+        case visitorTeam = "v"
+        case gameTime = "gametime"
+        case arenaName = "arena_name"
+        case status = "st"
+    }
+}
+
+struct TeamInfo: Codable {
+    let teamId: String
+    
+    enum CodingKeys: String, CodingKey {
+        case teamId = "tid"
+    }
+}
+
+GAME MODEL
+-------------------
+
+struct Team: Codable {
+    let teamId: String
+    let name: String
+    let logoURL: String
+    let primaryColor: String
+    
+    enum CodingKeys: String, CodingKey {
+        case teamId = "tid"
+        case name = "tn"
+        case logoURL = "logo"
+        case primaryColor = "color"
+    }
+}
+
+TEAM MODEL
+---------------------------
+
+import Foundation
+import Combine
+
+class DataService: ObservableObject {
+    @Published var games: [Game] = []
+    @Published var teams: [String: Team] = [:]
+    
+    static let shared = DataService()
+    
+    private var cancellables = Set<AnyCancellable>()
+    
+    func fetchScheduleAndTeams() {
+        let gameURL = Bundle.main.url(forResource: "Schedule", withExtension: "json")!
+        let teamURL = Bundle.main.url(forResource: "teams", withExtension: "json")!
+        
+        // Fetch Schedule
+        let schedulePublisher = Future<[Game], Never> { promise in
+            let data = try! Data(contentsOf: gameURL)
+            let decodedData = try! JSONDecoder().decode([String: [Game]].self, from: data)
+            promise(.success(decodedData["data"] ?? []))
+        }
+        
+        // Fetch Teams
+        let teamPublisher = Future<[String: Team], Never> { promise in
+            let data = try! Data(contentsOf: teamURL)
+            let decodedData = try! JSONDecoder().decode([String: [Team]].self, from: data)
+            let teamsDict = Dictionary(uniqueKeysWithValues: decodedData["teams"]!.map { ($0.teamId, $0) })
+            promise(.success(teamsDict))
+        }
+        
+        // Combine Results
+        Publishers.Zip(schedulePublisher, teamPublisher)
+            .delay(for: 1, scheduler: DispatchQueue.main) // Simulate API delay
+            .sink { [weak self] games, teams in
+                self?.games = games
+                self?.teams = teams
+            }
+            .store(in: &cancellables)
+    }
+}
+
+
+Parsing json data
+------------------------------
+
+class ScheduleViewModel: ObservableObject {
+    @Published var games: [Game] = []
+    @Published var teams: [String: Team] = [:]
+    private let appTeamID = "1610612748" // Miami Heat
+
+    private var dataService = DataService.shared
+    
+    init() {
+        dataService.fetchScheduleAndTeams()
+        bindData()
+    }
+    
+    private func bindData() {
+        dataService.$games.assign(to: &$games)
+        dataService.$teams.assign(to: &$teams)
+    }
+    
+    func teamDisplayText(home: TeamInfo, visitor: TeamInfo) -> String {
+        if home.teamId == appTeamID { return "vs" }
+        else if visitor.teamId == appTeamID { return "@" }
+        return "vs"
+    }
+}
+
+
+ Build SwiftUI UI
+--------------------------------
+
+import SwiftUI
+
+struct ScheduleView: View {
+    @StateObject private var viewModel = ScheduleViewModel()
+    
+    var body: some View {
+        NavigationView {
+            List {
+                ForEach(groupedGames.keys.sorted(), id: \.self) { month in
+                    Section(header: Text(month).font(.title2).bold()) {
+                        ForEach(groupedGames[month] ?? [], id: \.id) { game in
+                            GameRow(game: game, teams: viewModel.teams, displayText: viewModel.teamDisplayText)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Game Schedule")
+        }
+    }
+    
+    private var groupedGames: [String: [Game]] {
+        Dictionary(grouping: viewModel.games) { game in
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MMMM yyyy"
+            return formatter.string(from: game.gameTime)
+        }
+    }
+}
+
+struct GameRow: View {
+    let game: Game
+    let teams: [String: Team]
+    let displayText: (TeamInfo, TeamInfo) -> String
+    
+    var body: some View {
+        HStack {
+            if let visitor = teams[game.visitorTeam.teamId], let home = teams[game.homeTeam.teamId] {
+                VStack {
+                    AsyncImage(url: URL(string: visitor.logoURL)) { image in
+                        image.resizable()
+                    } placeholder: {
+                        Color.gray
+                    }
+                    .frame(width: 50, height: 50)
+                    
+                    Text(visitor.name).font(.caption)
+                }
+                
+                Text(displayText(game.homeTeam, game.visitorTeam))
+                    .font(.title2).bold()
+                    .frame(maxWidth: .infinity)
+                
+                VStack {
+                    AsyncImage(url: URL(string: home.logoURL)) { image in
+                        image.resizable()
+                    } placeholder: {
+                        Color.gray
+                    }
+                    .frame(width: 50, height: 50)
+                    
+                    Text(home.name).font(.caption)
+                }
+            }
+        }
+        .padding()
+        .background(Color(hex: teams[game.homeTeam.teamId]?.primaryColor ?? "FFFFFF"))
+        .cornerRadius(10)
+    }
+}
+
+ScheduleView
